@@ -656,7 +656,7 @@
                                     <th>Phone</th>
                                     <th>Address</th>
                                     <th>Joined</th>
-                                    <th>Orders</th>
+                                    <th>Total Orders</th>
                                 </tr>
                             </thead>
                             <tbody id="customersTable">
@@ -715,7 +715,7 @@
                                         <th>Address</th>
                                         <th>Contact</th>
                                         <th>Approved On</th>
-                                        <th>Status</th>
+                                        <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="approvedRestaurantsTable">
@@ -746,27 +746,6 @@
                                 </tbody>
                             </table>
                         </div>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <h3>Restaurant Sales Data</h3>
-                    <div class="table-container">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Restaurant</th>
-                                    <th>Total Orders</th>
-                                    <th>Total Sales</th>
-                                    <th>Commission</th>
-                                    <th>Rating</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="restaurantSalesTable">
-                                <tr><td colspan="6" class="empty-state">Loading...</td></tr>
-                            </tbody>
-                        </table>
                     </div>
                 </div>
             </div>
@@ -819,7 +798,7 @@
                                         <th>Vehicle</th>
                                         <th>Phone</th>
                                         <th>Approved On</th>
-                                        <th>Status</th>
+                                        <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="approvedDeliveryTable">
@@ -896,7 +875,7 @@
                 </div>
 
                 <div class="card">
-                    <h3>All Ratings</h3>
+                    <h3>All Ratings & Reviews</h3>
                     <div class="table-container">
                         <table>
                             <thead>
@@ -1015,6 +994,7 @@
                         <option value="Area not serviceable">Area not serviceable</option>
                         <option value="Duplicate application">Duplicate application</option>
                         <option value="Does not meet requirements">Does not meet requirements</option>
+                        <option value="Quality standards not met">Quality standards not met</option>
                         <option value="Other">Other (specify below)</option>
                     </select>
                 </div>
@@ -1038,6 +1018,17 @@
                 <button class="close-modal" onclick="closeRestaurantModal()">×</button>
             </div>
             <div id="restaurantModalContent"></div>
+        </div>
+    </div>
+
+    <!-- Delivery Partner Details Modal -->
+    <div id="deliveryModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Delivery Partner Details</h2>
+                <button class="close-modal" onclick="closeDeliveryModal()">×</button>
+            </div>
+            <div id="deliveryModalContent"></div>
         </div>
     </div>
 
@@ -1069,7 +1060,6 @@
         const ADMIN_PASSWORD = "admin123";
 
         let currentUser = null;
-        let currentRejectionData = null;
 
         // Utility functions
         function showError(message) {
@@ -1128,7 +1118,6 @@
                             break;
                         case 'restaurants':
                             loadPendingRestaurants();
-                            loadRestaurantSales();
                             break;
                         case 'delivery':
                             loadPendingDelivery();
@@ -1195,29 +1184,35 @@
 
         // Load statistics
         function loadStats() {
+            // Customers count
             db.ref('customers').on('value', (snapshot) => {
                 const customers = snapshot.val() || {};
                 document.getElementById('totalCustomers').textContent = Object.keys(customers).length;
             });
 
+            // Restaurants count (only approved ones)
             db.ref('restaurants').on('value', (snapshot) => {
                 const restaurants = snapshot.val() || {};
-                const totalRestaurants = Object.keys(restaurants).length;
-                const pendingRestaurants = Object.values(restaurants).filter(r => !r.approved && !r.rejected).length;
+                const approvedRestaurants = Object.values(restaurants).filter(r => r.approved);
+                const pendingRestaurants = Object.values(restaurants).filter(r => !r.approved && !r.rejected);
                 
-                document.getElementById('totalRestaurants').textContent = totalRestaurants;
-                document.getElementById('pendingApprovals').textContent = pendingRestaurants;
+                document.getElementById('totalRestaurants').textContent = approvedRestaurants.length;
+                document.getElementById('pendingApprovals').textContent = pendingRestaurants.length;
             });
 
+            // Delivery partners count (only approved ones)
             db.ref('deliveryPartners').on('value', (snapshot) => {
                 const partners = snapshot.val() || {};
-                document.getElementById('totalDelivery').textContent = Object.keys(partners).length;
+                const approvedPartners = Object.values(partners).filter(p => p.approved);
+                document.getElementById('totalDelivery').textContent = approvedPartners.length;
             });
 
+            // Orders and revenue
             db.ref('orders').on('value', (snapshot) => {
                 const orders = snapshot.val() || {};
                 const ordersArray = Object.values(orders);
                 
+                // Today's orders
                 const today = new Date().setHours(0,0,0,0);
                 const todayOrders = ordersArray.filter(order => 
                     new Date(order.createdAt).setHours(0,0,0,0) === today
@@ -1225,6 +1220,7 @@
                 
                 document.getElementById('todayOrders').textContent = todayOrders.length;
                 
+                // Total revenue
                 const totalRevenue = ordersArray.reduce((sum, order) => sum + (order.total || 0), 0);
                 document.getElementById('totalRevenue').textContent = totalRevenue.toLocaleString();
             });
@@ -1266,6 +1262,51 @@
             } catch (error) {
                 return 'Unknown Customer';
             }
+        }
+
+        // Load customers with order counts
+        function loadCustomers() {
+            db.ref('customers').on('value', async (snapshot) => {
+                const customers = snapshot.val() || {};
+                const customersWithOrders = await Promise.all(
+                    Object.entries(customers).map(async ([uid, customer]) => {
+                        const orderCount = await getCustomerOrderCount(uid);
+                        return { uid, ...customer, orderCount };
+                    })
+                );
+                displayCustomers(customersWithOrders);
+            });
+        }
+
+        // Get customer order count
+        async function getCustomerOrderCount(customerId) {
+            try {
+                const snapshot = await db.ref('orders').orderByChild('customerId').equalTo(customerId).once('value');
+                const orders = snapshot.val() || {};
+                return Object.keys(orders).length;
+            } catch (error) {
+                return 0;
+            }
+        }
+
+        // Display customers
+        function displayCustomers(customers) {
+            const table = document.getElementById('customersTable');
+            if (customers.length === 0) {
+                table.innerHTML = '<tr><td colspan="6" class="empty-state">No customers found</td></tr>';
+                return;
+            }
+
+            table.innerHTML = customers.map(customer => `
+                <tr>
+                    <td>${customer.name || 'N/A'}</td>
+                    <td>${customer.email || 'N/A'}</td>
+                    <td>${customer.phone || 'N/A'}</td>
+                    <td>${customer.address ? (customer.address.substring(0, 30) + (customer.address.length > 30 ? '...' : '')) : 'N/A'}</td>
+                    <td>${customer.createdAt ? new Date(customer.createdAt).toLocaleDateString() : 'N/A'}</td>
+                    <td>${customer.orderCount || 0}</td>
+                </tr>
+            `).join('');
         }
 
         // Load pending restaurants
@@ -1329,7 +1370,14 @@
                     <td>${restaurant.address ? (restaurant.address.substring(0, 30) + (restaurant.address.length > 30 ? '...' : '')) : 'N/A'}</td>
                     <td>${restaurant.phone || restaurant.email || 'N/A'}</td>
                     <td>${restaurant.approvedAt ? new Date(restaurant.approvedAt).toLocaleDateString() : 'N/A'}</td>
-                    <td><span class="status-badge status-approved">Approved</span></td>
+                    <td class="action-buttons">
+                        <button class="action-btn btn-danger" onclick="openRejectionModal('${uid}', 'restaurant')">
+                            Reject
+                        </button>
+                        <button class="action-btn btn-info" onclick="viewRestaurantDetails('${uid}')">
+                            View
+                        </button>
+                    </td>
                 </tr>
             `).join('');
         }
@@ -1430,7 +1478,14 @@
                     <td>${(partner.vehicle || 'N/A') + ' - ' + (partner.vehicleNumber || 'N/A')}</td>
                     <td>${partner.phone || 'N/A'}</td>
                     <td>${partner.approvedAt ? new Date(partner.approvedAt).toLocaleDateString() : 'N/A'}</td>
-                    <td><span class="status-badge status-approved">Approved</span></td>
+                    <td class="action-buttons">
+                        <button class="action-btn btn-danger" onclick="openRejectionModal('${uid}', 'delivery')">
+                            Reject
+                        </button>
+                        <button class="action-btn btn-info" onclick="viewDeliveryPartner('${uid}')">
+                            View
+                        </button>
+                    </td>
                 </tr>
             `).join('');
         }
@@ -1468,6 +1523,102 @@
                     </td>
                 </tr>
             `).join('');
+        }
+
+        // Load all orders
+        function loadAllOrders() {
+            db.ref('orders').on('value', async (snapshot) => {
+                const orders = snapshot.val() || {};
+                const ordersArray = Object.entries(orders).reverse();
+                displayAllOrders(ordersArray);
+            });
+        }
+
+        // Display all orders
+        async function displayAllOrders(orders) {
+            const table = document.getElementById('ordersTable');
+            if (orders.length === 0) {
+                table.innerHTML = '<tr><td colspan="8" class="empty-state">No orders found</td></tr>';
+                return;
+            }
+
+            let tableHTML = '';
+            for (const [orderId, order] of orders) {
+                const customerName = await getCustomerName(order.customerId);
+                
+                tableHTML += `
+                    <tr>
+                        <td>#${orderId.slice(-6)}</td>
+                        <td>${customerName}</td>
+                        <td>${order.restaurantName || 'Unknown'}</td>
+                        <td>${order.items ? order.items.map(i => `${i.quantity}x ${i.name}`).join(', ') : 'No items'}</td>
+                        <td>₹${order.total || 0}</td>
+                        <td><span class="status-badge status-${order.status}">${order.status}</span></td>
+                        <td>${new Date(order.createdAt).toLocaleDateString()}</td>
+                        <td>
+                            <button class="action-btn btn-secondary" onclick="viewOrderDetails('${orderId}')">
+                                View
+                            </button>
+                            ${order.status !== 'delivered' && order.status !== 'cancelled' ? `
+                                <button class="action-btn btn-danger" onclick="cancelOrder('${orderId}')">
+                                    Cancel
+                                </button>
+                            ` : ''}
+                        </td>
+                    </tr>
+                `;
+            }
+            table.innerHTML = tableHTML;
+        }
+
+        // Load ratings and reviews
+        function loadRatings() {
+            db.ref('ratings').on('value', async (snapshot) => {
+                const ratings = snapshot.val() || {};
+                const ratingsArray = Object.entries(ratings).reverse();
+                displayRatings(ratingsArray);
+            });
+        }
+
+        // Display ratings
+        async function displayRatings(ratings) {
+            const table = document.getElementById('ratingsTable');
+            if (ratings.length === 0) {
+                table.innerHTML = '<tr><td colspan="6" class="empty-state">No ratings found</td></tr>';
+                return;
+            }
+
+            let tableHTML = '';
+            for (const [ratingId, rating] of ratings) {
+                const customerName = await getCustomerName(rating.customerId);
+                
+                // Get restaurant name from order
+                let restaurantName = 'Unknown Restaurant';
+                try {
+                    const orderSnapshot = await db.ref(`orders/${rating.orderId}`).once('value');
+                    const order = orderSnapshot.val();
+                    restaurantName = order ? order.restaurantName : 'Unknown Restaurant';
+                } catch (error) {
+                    console.error('Error loading order:', error);
+                }
+
+                tableHTML += `
+                    <tr>
+                        <td>#${rating.orderId ? rating.orderId.slice(-6) : 'N/A'}</td>
+                        <td>${customerName}</td>
+                        <td>${restaurantName}</td>
+                        <td>
+                            <div class="rating-stars">
+                                ${'★'.repeat(rating.rating)}${'☆'.repeat(5 - rating.rating)}
+                            </div>
+                            <small>${rating.rating}/5</small>
+                        </td>
+                        <td>${rating.review || 'No review'}</td>
+                        <td>${new Date(rating.createdAt).toLocaleDateString()}</td>
+                    </tr>
+                `;
+            }
+            table.innerHTML = tableHTML;
         }
 
         // Load all rejections
@@ -1519,9 +1670,65 @@
             `).join('');
         }
 
+        // Load settings
+        function loadSettings() {
+            // Load current commission settings
+            db.ref('admin/settings').once('value').then(snapshot => {
+                const settings = snapshot.val() || { commission: 20, minDeliveryFee: 30 };
+                document.getElementById('commissionPercentage').value = settings.commission;
+                document.getElementById('minDeliveryAmount').value = settings.minDeliveryFee;
+                document.getElementById('currentCommission').textContent = settings.commission + '%';
+                document.getElementById('minDeliveryFee').textContent = '₹' + settings.minDeliveryFee;
+            });
+
+            // Set admin email
+            document.getElementById('adminEmail').value = ADMIN_EMAIL;
+        }
+
+        // Commission form handler
+        document.getElementById('commissionForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const commission = parseInt(document.getElementById('commissionPercentage').value);
+            const minDeliveryFee = parseInt(document.getElementById('minDeliveryAmount').value);
+
+            try {
+                await db.ref('admin/settings').set({
+                    commission,
+                    minDeliveryFee,
+                    updatedAt: Date.now()
+                });
+                alert('Commission settings updated successfully!');
+                loadSettings();
+            } catch (error) {
+                alert('Error updating commission settings: ' + error.message);
+            }
+        });
+
+        // Admin form handler
+        document.getElementById('adminForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const newPassword = document.getElementById('adminPassword').value;
+            
+            if (newPassword) {
+                try {
+                    const user = auth.currentUser;
+                    if (user) {
+                        await user.updatePassword(newPassword);
+                        alert('Admin password updated successfully!');
+                        document.getElementById('adminPassword').value = '';
+                    } else {
+                        alert('No user logged in.');
+                    }
+                } catch (error) {
+                    alert('Error updating password: ' + error.message);
+                }
+            } else {
+                alert('No changes made.');
+            }
+        });
+
         // Open rejection modal
         window.openRejectionModal = (id, type) => {
-            currentRejectionData = { id, type };
             document.getElementById('rejectionId').value = id;
             document.getElementById('rejectionType').value = type;
             document.getElementById('rejectionModal').classList.add('active');
@@ -1531,7 +1738,6 @@
         // Close rejection modal
         window.closeRejectionModal = () => {
             document.getElementById('rejectionModal').classList.remove('active');
-            currentRejectionData = null;
         };
 
         // Rejection form handler
@@ -1561,8 +1767,13 @@
                 closeRejectionModal();
                 
                 // Reload the current view
-                if (type === 'restaurant') loadPendingRestaurants();
-                else if (type === 'delivery') loadPendingDelivery();
+                if (type === 'restaurant') {
+                    loadPendingRestaurants();
+                    loadApprovedRestaurants();
+                } else if (type === 'delivery') {
+                    loadPendingDelivery();
+                    loadApprovedDelivery();
+                }
                 
             } catch (error) {
                 alert('Error rejecting application: ' + error.message);
@@ -1635,8 +1846,124 @@
             }
         };
 
-        // [Rest of the functions remain the same as previous version...]
-        // Load customers, orders, ratings, settings functions remain unchanged
+        // View details functions
+        window.viewRestaurantDetails = async (restaurantId) => {
+            try {
+                const snapshot = await db.ref(`restaurants/${restaurantId}`).once('value');
+                const restaurant = snapshot.val();
+                
+                const modalContent = document.getElementById('restaurantModalContent');
+                modalContent.innerHTML = `
+                    <div class="form-group">
+                        <label>Restaurant Name</label>
+                        <input type="text" value="${restaurant.name || 'N/A'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Cuisine</label>
+                        <input type="text" value="${restaurant.cuisine || 'Multi-cuisine'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Address</label>
+                        <textarea rows="3" readonly>${restaurant.address || 'N/A'}</textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Contact</label>
+                        <input type="text" value="${restaurant.phone || restaurant.email || 'N/A'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Business Hours</label>
+                        <input type="text" value="${restaurant.hours || 'Not specified'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Status</label>
+                        <input type="text" value="${restaurant.approved ? 'Approved' : restaurant.rejected ? 'Rejected' : 'Pending'}" readonly>
+                    </div>
+                    ${restaurant.rejected ? `
+                        <div class="rejection-reason">
+                            <h4>Rejection Reason</h4>
+                            <p>${restaurant.rejectionReason || 'No reason provided'}</p>
+                            ${restaurant.rejectionNotes ? `<p><strong>Notes:</strong> ${restaurant.rejectionNotes}</p>` : ''}
+                        </div>
+                    ` : ''}
+                `;
+                
+                document.getElementById('restaurantModal').classList.add('active');
+            } catch (error) {
+                alert('Error loading restaurant details: ' + error.message);
+            }
+        };
+
+        window.viewDeliveryPartner = async (partnerId) => {
+            try {
+                const snapshot = await db.ref(`deliveryPartners/${partnerId}`).once('value');
+                const partner = snapshot.val();
+                
+                const modalContent = document.getElementById('deliveryModalContent');
+                modalContent.innerHTML = `
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input type="text" value="${partner.name || 'N/A'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="text" value="${partner.email || 'N/A'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Phone</label>
+                        <input type="text" value="${partner.phone || 'N/A'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Vehicle Type</label>
+                        <input type="text" value="${partner.vehicle || 'N/A'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Vehicle Number</label>
+                        <input type="text" value="${partner.vehicleNumber || 'N/A'}" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Status</label>
+                        <input type="text" value="${partner.approved ? 'Approved' : partner.rejected ? 'Rejected' : 'Pending'}" readonly>
+                    </div>
+                    ${partner.rejected ? `
+                        <div class="rejection-reason">
+                            <h4>Rejection Reason</h4>
+                            <p>${partner.rejectionReason || 'No reason provided'}</p>
+                            ${partner.rejectionNotes ? `<p><strong>Notes:</strong> ${partner.rejectionNotes}</p>` : ''}
+                        </div>
+                    ` : ''}
+                `;
+                
+                document.getElementById('deliveryModal').classList.add('active');
+            } catch (error) {
+                alert('Error loading delivery partner details: ' + error.message);
+            }
+        };
+
+        window.closeRestaurantModal = () => {
+            document.getElementById('restaurantModal').classList.remove('active');
+        };
+
+        window.closeDeliveryModal = () => {
+            document.getElementById('deliveryModal').classList.remove('active');
+        };
+
+        // Placeholder functions for future implementation
+        window.viewOrderDetails = (orderId) => {
+            alert('View order details feature coming soon!');
+        };
+
+        window.cancelOrder = (orderId) => {
+            if (confirm('Are you sure you want to cancel this order?')) {
+                db.ref(`orders/${orderId}`).update({
+                    status: 'cancelled',
+                    updatedAt: Date.now()
+                }).then(() => {
+                    alert('Order cancelled successfully!');
+                }).catch(error => {
+                    alert('Error cancelling order: ' + error.message);
+                });
+            }
+        };
 
         // Logout function
         window.logout = async () => {
